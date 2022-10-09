@@ -11,7 +11,6 @@ from PIL import Image, ImageFont, ImageDraw, PngImagePlugin
 from fonts.ttf import Roboto
 import string
 
-import modules.shared
 from modules import sd_samplers, shared
 from modules.shared import opts, cmd_opts
 
@@ -52,8 +51,8 @@ def split_grid(image, tile_w=512, tile_h=512, overlap=64):
     cols = math.ceil((w - overlap) / non_overlap_width)
     rows = math.ceil((h - overlap) / non_overlap_height)
 
-    dx = (w - tile_w) / (cols-1) if cols > 1 else 0
-    dy = (h - tile_h) / (rows-1) if rows > 1 else 0
+    dx = (w - tile_w) / (cols - 1) if cols > 1 else 0
+    dy = (h - tile_h) / (rows - 1) if rows > 1 else 0
 
     grid = Grid([], tile_w, tile_h, w, h, overlap)
     for row in range(rows):
@@ -67,7 +66,7 @@ def split_grid(image, tile_w=512, tile_h=512, overlap=64):
         for col in range(cols):
             x = int(col * dx)
 
-            if x+tile_w >= w:
+            if x + tile_w >= w:
                 x = w - tile_w
 
             tile = image.crop((x, y, x + tile_w, y + tile_h))
@@ -132,7 +131,7 @@ def draw_grid_annotations(im, width, height, hor_texts, ver_texts):
             drawing.multiline_text((draw_x, draw_y + line.size[1] / 2), line.text, font=fnt, fill=color_active if line.is_active else color_inactive, anchor="mm", align="center")
 
             if not line.is_active:
-                drawing.line((draw_x - line.size[0]//2, draw_y + line.size[1]//2, draw_x + line.size[0]//2, draw_y + line.size[1]//2), fill=color_inactive, width=4)
+                drawing.line((draw_x - line.size[0] // 2, draw_y + line.size[1] // 2, draw_x + line.size[0] // 2, draw_y + line.size[1] // 2), fill=color_inactive, width=4)
 
             draw_y += line.size[1] + line_spacing
 
@@ -171,7 +170,8 @@ def draw_grid_annotations(im, width, height, hor_texts, ver_texts):
             line.size = (bbox[2] - bbox[0], bbox[3] - bbox[1])
 
     hor_text_heights = [sum([line.size[1] + line_spacing for line in lines]) - line_spacing for lines in hor_texts]
-    ver_text_heights = [sum([line.size[1] + line_spacing for line in lines]) - line_spacing * len(lines) for lines in ver_texts]
+    ver_text_heights = [sum([line.size[1] + line_spacing for line in lines]) - line_spacing * len(lines) for lines in
+                        ver_texts]
 
     pad_top = max(hor_text_heights) + line_spacing * 2
 
@@ -209,8 +209,27 @@ def draw_prompt_matrix(im, width, height, all_prompts):
 
 
 def resize_image(resize_mode, im, width, height):
+    def resize(im, w, h):
+        if opts.upscaler_for_img2img is None or opts.upscaler_for_img2img == "None" or im.mode == 'L':
+            return im.resize((w, h), resample=LANCZOS)
+
+        scale = max(w / im.width, h / im.height)
+
+        if scale > 1.0:
+            upscalers = [x for x in shared.sd_upscalers if x.name == opts.upscaler_for_img2img]
+            assert len(upscalers) > 0, f"could not find upscaler named {opts.upscaler_for_img2img}"
+
+            upscaler = upscalers[0]
+            im = upscaler.scaler.upscale(im, scale, upscaler.data_path)
+
+        if im.width != w or im.height != h:
+            im = im.resize((w, h), resample=LANCZOS)
+
+        return im
+
     if resize_mode == 0:
-        res = im.resize((width, height), resample=LANCZOS)
+        res = resize(im, width, height)
+
     elif resize_mode == 1:
         ratio = width / height
         src_ratio = im.width / im.height
@@ -218,9 +237,10 @@ def resize_image(resize_mode, im, width, height):
         src_w = width if ratio > src_ratio else im.width * height // im.height
         src_h = height if ratio <= src_ratio else im.height * width // im.width
 
-        resized = im.resize((src_w, src_h), resample=LANCZOS)
+        resized = resize(im, src_w, src_h)
         res = Image.new("RGB", (width, height))
         res.paste(resized, box=(width // 2 - src_w // 2, height // 2 - src_h // 2))
+
     else:
         ratio = width / height
         src_ratio = im.width / im.height
@@ -228,7 +248,7 @@ def resize_image(resize_mode, im, width, height):
         src_w = width if ratio < src_ratio else im.width * height // im.height
         src_h = height if ratio >= src_ratio else im.height * width // im.width
 
-        resized = im.resize((src_w, src_h), resample=LANCZOS)
+        resized = resize(im, src_w, src_h)
         res = Image.new("RGB", (width, height))
         res.paste(resized, box=(width // 2 - src_w // 2, height // 2 - src_h // 2))
 
@@ -247,9 +267,8 @@ def resize_image(resize_mode, im, width, height):
 invalid_filename_chars = '<>:"/\\|?*\n'
 invalid_filename_prefix = ' '
 invalid_filename_postfix = ' .'
-re_nonletters = re.compile(r'[\s'+string.punctuation+']+')
+re_nonletters = re.compile(r'[\s' + string.punctuation + ']+')
 max_filename_part_length = 128
-max_prompt_words = 8
 
 
 def sanitize_filename_part(text, replace_spaces=True):
@@ -263,11 +282,37 @@ def sanitize_filename_part(text, replace_spaces=True):
 
 
 def apply_filename_pattern(x, p, seed, prompt):
+    max_prompt_words = opts.directories_max_prompt_words
+
     if seed is not None:
         x = x.replace("[seed]", str(seed))
 
+    if p is not None:
+        x = x.replace("[steps]", str(p.steps))
+        x = x.replace("[cfg]", str(p.cfg_scale))
+        x = x.replace("[width]", str(p.width))
+        x = x.replace("[height]", str(p.height))
+        x = x.replace("[styles]", sanitize_filename_part(", ".join([x for x in p.styles if not x == "None"]) or "None", replace_spaces=False))
+        x = x.replace("[sampler]", sanitize_filename_part(sd_samplers.samplers[p.sampler_index].name, replace_spaces=False))
+
+    x = x.replace("[model_hash]", getattr(p, "sd_model_hash", shared.sd_model.sd_model_hash))
+    x = x.replace("[date]", datetime.date.today().isoformat())
+    x = x.replace("[datetime]", datetime.datetime.now().strftime("%Y%m%d%H%M%S"))
+    x = x.replace("[job_timestamp]", getattr(p, "job_timestamp", shared.state.job_timestamp))
+
+    # Apply [prompt] at last. Because it may contain any replacement word.^M
     if prompt is not None:
         x = x.replace("[prompt]", sanitize_filename_part(prompt))
+        if "[prompt_no_styles]" in x:
+            prompt_no_style = prompt
+            for style in shared.prompt_styles.get_style_prompts(p.styles):
+                if len(style) > 0:
+                    style_parts = [y for y in style.split("{prompt}")]
+                    for part in style_parts:
+                        prompt_no_style = prompt_no_style.replace(part, "").replace(", ,", ",").strip().strip(',')
+            prompt_no_style = prompt_no_style.replace(style, "").strip().strip(',').strip()
+            x = x.replace("[prompt_no_styles]", sanitize_filename_part(prompt_no_style, replace_spaces=False))
+
         x = x.replace("[prompt_spaces]", sanitize_filename_part(prompt, replace_spaces=False))
         if "[prompt_words]" in x:
             words = [x for x in re_nonletters.split(prompt or "") if len(x) > 0]
@@ -275,20 +320,11 @@ def apply_filename_pattern(x, p, seed, prompt):
                 words = ["empty"]
             x = x.replace("[prompt_words]", sanitize_filename_part(" ".join(words[0:max_prompt_words]), replace_spaces=False))
 
-    if p is not None:
-        x = x.replace("[steps]", str(p.steps))
-        x = x.replace("[cfg]", str(p.cfg_scale))
-        x = x.replace("[width]", str(p.width))
-        x = x.replace("[height]", str(p.height))
-        x = x.replace("[sampler]", sanitize_filename_part(sd_samplers.samplers[p.sampler_index].name, replace_spaces=False))
-
-    x = x.replace("[model_hash]", shared.sd_model.sd_model_hash)
-    x = x.replace("[date]", datetime.date.today().isoformat())
-
     if cmd_opts.hide_ui_dir_config:
         x = re.sub(r'^[\\/]+|\.{2,}[\\/]+|[\\/]+\.{2,}', '', x)
 
     return x
+
 
 def get_next_sequence_number(path, basename):
     """
@@ -303,7 +339,7 @@ def get_next_sequence_number(path, basename):
     prefix_length = len(basename)
     for p in os.listdir(path):
         if p.startswith(basename):
-            l = os.path.splitext(p[prefix_length:])[0].split('-') #splits the filename (removing the basename first if one is defined, so the sequence number is always the first element)
+            l = os.path.splitext(p[prefix_length:])[0].split('-')  # splits the filename (removing the basename first if one is defined, so the sequence number is always the first element)
             try:
                 result = max(int(l[0]), result)
             except ValueError:
@@ -311,7 +347,40 @@ def get_next_sequence_number(path, basename):
 
     return result + 1
 
-def save_image(image, path, basename, seed=None, prompt=None, extension='png', info=None, short_filename=False, no_prompt=False, grid=False, pnginfo_section_name='parameters', p=None, existing_info=None, forced_filename=None):
+
+def save_image(image, path, basename, seed=None, prompt=None, extension='png', info=None, short_filename=False, no_prompt=False, grid=False, pnginfo_section_name='parameters', p=None, existing_info=None, forced_filename=None, suffix="", save_to_dirs=None):
+    '''Save an image.
+
+    Args:
+        image (`PIL.Image`):
+            The image to be saved.
+        path (`str`):
+            The directory to save the image. Note, the option `save_to_dirs` will make the image to be saved into a sub directory.
+        basename (`str`):
+            The base filename which will be applied to `filename pattern`.
+        seed, prompt, short_filename, 
+        extension (`str`):
+            Image file extension, default is `png`.
+        pngsectionname (`str`):
+            Specify the name of the section which `info` will be saved in.
+        info (`str` or `PngImagePlugin.iTXt`):
+            PNG info chunks.
+        existing_info (`dict`):
+            Additional PNG info. `existing_info == {pngsectionname: info, ...}`
+        no_prompt:
+            TODO I don't know its meaning.
+        p (`StableDiffusionProcessing`)
+        forced_filename (`str`):
+            If specified, `basename` and filename pattern will be ignored.
+        save_to_dirs (bool):
+            If true, the image will be saved into a subdirectory of `path`.
+
+    Returns: (fullfn, txt_fullfn)
+        fullfn (`str`):
+            The full path of the saved imaged.
+        txt_fullfn (`str` or None):
+            If a text file is saved for this image, this will be its full path. Otherwise None.
+    '''
     if short_filename or prompt is None or seed is None:
         file_decoration = ""
     elif opts.save_to_dirs:
@@ -322,7 +391,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
     if file_decoration != "":
         file_decoration = "-" + file_decoration.lower()
 
-    file_decoration = apply_filename_pattern(file_decoration, p, seed, prompt)
+    file_decoration = apply_filename_pattern(file_decoration, p, seed, prompt) + suffix
 
     if extension == 'png' and opts.enable_pnginfo and info is not None:
         pnginfo = PngImagePlugin.PngInfo()
@@ -335,10 +404,11 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
     else:
         pnginfo = None
 
-    save_to_dirs = (grid and opts.grid_save_to_dirs) or (not grid and opts.save_to_dirs and not no_prompt)
+    if save_to_dirs is None:
+        save_to_dirs = (grid and opts.grid_save_to_dirs) or (not grid and opts.save_to_dirs and not no_prompt)
 
     if save_to_dirs:
-        dirname = apply_filename_pattern(opts.directories_filename_pattern or "[prompt_words]", p, seed, prompt)
+        dirname = apply_filename_pattern(opts.directories_filename_pattern or "[prompt_words]", p, seed, prompt).strip('\\ /')
         path = os.path.join(path, dirname)
 
     os.makedirs(path, exist_ok=True)
@@ -348,7 +418,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
         fullfn = "a.png"
         fullfn_without_extension = "a"
         for i in range(500):
-            fn = f"{basecount+i:05}" if basename == '' else f"{basename}-{basecount+i:04}"
+            fn = f"{basecount + i:05}" if basename == '' else f"{basename}-{basecount + i:04}"
             fullfn = os.path.join(path, f"{fn}{file_decoration}.{extension}")
             fullfn_without_extension = os.path.join(path, f"{fn}{file_decoration}")
             if not os.path.exists(fullfn):
@@ -386,35 +456,10 @@ def save_image(image, path, basename, seed=None, prompt=None, extension='png', i
             piexif.insert(exif_bytes(), fullfn_without_extension + ".jpg")
 
     if opts.save_txt and info is not None:
-        with open(f"{fullfn_without_extension}.txt", "w", encoding="utf8") as file:
+        txt_fullfn = f"{fullfn_without_extension}.txt"
+        with open(txt_fullfn, "w", encoding="utf8") as file:
             file.write(info + "\n")
+    else:
+        txt_fullfn = None
 
-
-class Upscaler:
-    name = "Lanczos"
-
-    def do_upscale(self, img):
-        return img
-
-    def upscale(self, img, w, h):
-        for i in range(3):
-            if img.width >= w and img.height >= h:
-                break
-
-            img = self.do_upscale(img)
-
-        if img.width != w or img.height != h:
-            img = img.resize((int(w), int(h)), resample=LANCZOS)
-
-        return img
-
-
-class UpscalerNone(Upscaler):
-    name = "None"
-
-    def upscale(self, img, w, h):
-        return img
-
-
-modules.shared.sd_upscalers.append(UpscalerNone())
-modules.shared.sd_upscalers.append(Upscaler())
+    return fullfn, txt_fullfn
